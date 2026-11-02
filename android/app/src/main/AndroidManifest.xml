@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+ <application android:icon="@mipmap/ic_launcher" android:label="fi-focus" android:allowBackup="false" android:theme="@android:style/Theme.Material.NoActionBar">
+  <activity android:name=".MainActivity" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode" android:launchMode="singleTask" android:exported="true">
+   <meta-data android:name="android.app.lib_name" android:value="fi_focus_lib" />
+   <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+  </activity>
+  <service android:name=".AudioService" android:foregroundServiceType="mediaPlayback" android:exported="false" />
+ </application>
+</manifest>
+
