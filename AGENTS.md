@@ -6,7 +6,7 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - Pertahankan aplikasi kecil: tiga pilihan suara, satu suara aktif, ketuk pilihan aktif untuk berhenti. Jangan menambah framework, dependensi, pengaturan, atau fitur tanpa kebutuhan tugas.
 - Audio dihasilkan secara kontinu di callback CPAL. Hindari alokasi, I/O, logging per sampel, atau operasi blocking di callback.
 - State filter harus bertahan antar-buffer. Jangan menginisialisasi ulang filter setiap callback atau setiap kanal.
-- Sample rate dan jumlah kanal mengikuti konfigurasi default perangkat. Satu sampel mono disalin ke seluruh kanal; ini bukan binaural atau stereo independen.
+- Sample rate dan jumlah kanal mengikuti konfigurasi default perangkat. Windows dan Android memakai generator dan state filter terpisah per kanal output (stereo independen pada perangkat stereo). Ini bukan binaural beats.
 - Volume digital tidak menentukan SPL di telinga. Jangan menyebut level aman atau dosis ADHD hanya berdasarkan amplitudo sampel.
 
 ## Struktur
@@ -26,9 +26,10 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 ## Audio
 - Mode `0` berhenti, `1` white, `2` pink, `3` brown. State pilihan memakai atomik; stream dimiliki sepanjang pemutaran.
 - White memakai xorshift32 dengan seed awal tetap, dipetakan ke sekitar ±1/30. Pembagian 30 mengatur amplitudo, bukan frekuensi atau tempo.
-- Pink memakai filter Paul Kellett dengan tujuh state dan gain 0.11. `b[6]` diperbarui sesudah menghitung output. Target spektrum daya 1/f, sekitar −3 dB/oktaf.
-- Brown memakai integrator bocor dengan `a = exp(-2*pi*5/sample_rate)` dan input `sqrt(1-a*a) * white`. Batas bawah 5 Hz mencegah drift DC, mempertahankan karakter antar-sample-rate, dan menyetarakan RMS teoretis dengan white. Target audibel mendekati −6 dB/oktaf; bukan integrator ideal sampai DC.
-- RMS sama tidak berarti kenyaringan yang dirasakan sama. Pink belum dinormalisasi agar setara white/brown.
+- Pink memakai filter Paul Kellett dengan tujuh state dan gain 0.33. `b[6]` diperbarui sesudah menghitung output. Target spektrum daya 1/f, sekitar −3 dB/oktaf.
+- Brown memakai integrator bocor dengan `a = exp(-2*pi*5/sample_rate)` dan input `sqrt(1-a*a) * white`. Batas bawah 5 Hz mencegah drift DC, mempertahankan karakter antar-sample-rate, dan menyetarakan RMS teoretis sebelum gain dengan white. Target audibel mendekati −6 dB/oktaf; bukan integrator ideal sampai DC.
+- Gain Brown dikalikan 2.2 untuk keseimbangan level dengan Pink pada Windows dan Android.
+- RMS sama tidak berarti kenyaringan yang dirasakan sama. Gain Pink disesuaikan agar RMS mendekati white.
 - Pergantian mode memakai fade-out lalu fade-in sekitar 20 ms per tahap. State pink/brown dipertahankan saat berganti mode; stream baru memulai state dari nol.
 - Format output yang ditangani: F32, I16, U16. Format lain dan kegagalan perangkat harus masuk jalur error yang terlihat di UI.
 - Timer UI 50 ms melepas stream setelah fade berhenti selesai dan menangani error stream. Jangan melepas stream sebelum fade selesai.

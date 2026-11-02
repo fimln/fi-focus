@@ -6,37 +6,42 @@ fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>)
     let device = cpal::default_host().default_output_device().ok_or("Output audio tidak tersedia")?;
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     let channels = config.channels() as usize;
-    let mut seed = 0x12345678u32; let mut b = [0f32; 7]; let mut brown = 0f32;
+    let mut generators: Vec<_> = (0..channels).map(|channel| {
+        (0x12345678u32.wrapping_add((channel as u32).wrapping_mul(0x9e3779b9)), [0f32; 7], 0f32)
+    }).collect();
     // A 5 Hz leak prevents DC drift while preserving the audible brown slope.
     let brown_pole = (-2.0 * std::f32::consts::PI * 5.0 / config.sample_rate() as f32).exp();
     let brown_input = (1.0 - brown_pole * brown_pole).sqrt();
     let step = 1.0 / (config.sample_rate() as f32 * 0.02);
     let mut mode = 0u8;
     let mut gain = 0f32;
-    let mut sample = move || -> f32 {
-        let target = state.load(Ordering::Relaxed);
-        if target != mode {
-            gain = (gain - step).max(0.0);
-            if gain == 0.0 { mode = target; }
-        } else {
-            gain = (gain + step).min(1.0);
+    let mut sample = move |channel: usize| -> f32 {
+        if channel == 0 {
+            let target = state.load(Ordering::Relaxed);
+            if target != mode {
+                gain = (gain - step).max(0.0);
+                if gain == 0.0 { mode = target; }
+            } else {
+                gain = (gain + step).min(1.0);
+            }
+            silent.store(mode == 0, Ordering::Relaxed);
         }
-        silent.store(mode == 0, Ordering::Relaxed);
         if mode == 0 { return 0.0; }
-        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-        let w = (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) / 30.0;
+        let (seed, b, brown) = &mut generators[channel];
+        *seed ^= *seed << 13; *seed ^= *seed >> 17; *seed ^= *seed << 5;
+        let w = (*seed as f32 / u32::MAX as f32 * 2.0 - 1.0) / 30.0;
         let value = match mode {
             1 => w,
-            2 => { b[0]=0.99886*b[0]+w*0.0555179; b[1]=0.99332*b[1]+w*0.0750759; b[2]=0.969*b[2]+w*0.153852; b[3]=0.8665*b[3]+w*0.3104856; b[4]=0.55*b[4]+w*0.5329522; b[5]= -0.7616*b[5]-w*0.016898; let x=(b.iter().sum::<f32>()+w*0.5362)*0.11; b[6]=w*0.115926; x },
-            3 => { brown=brown_pole*brown+brown_input*w; brown }, _ => 0.0
+            2 => { b[0]=0.99886*b[0]+w*0.0555179; b[1]=0.99332*b[1]+w*0.0750759; b[2]=0.969*b[2]+w*0.153852; b[3]=0.8665*b[3]+w*0.3104856; b[4]=0.55*b[4]+w*0.5329522; b[5]= -0.7616*b[5]-w*0.016898; let x=(b.iter().sum::<f32>()+w*0.5362)*0.33; b[6]=w*0.115926; x },
+            3 => { *brown=brown_pole* *brown+brown_input*w; *brown * 2.2 }, _ => 0.0
         };
         value * gain
     };
     let err = move |e| { eprintln!("Audio: {e}"); failed.store(true, Ordering::Relaxed); };
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_output_stream(config.into(), move |data: &mut [f32], _| { for frame in data.chunks_mut(channels) { frame.fill(sample()); } }, err, None),
-        cpal::SampleFormat::I16 => device.build_output_stream(config.into(), move |data: &mut [i16], _| { for frame in data.chunks_mut(channels) { frame.fill((sample()*32767.0) as i16); } }, err, None),
-        cpal::SampleFormat::U16 => device.build_output_stream(config.into(), move |data: &mut [u16], _| { for frame in data.chunks_mut(channels) { frame.fill(((sample()+1.0)*32767.5) as u16); } }, err, None),
+        cpal::SampleFormat::F32 => device.build_output_stream(config.into(), move |data: &mut [f32], _| { for frame in data.chunks_mut(channels) { for (channel, value) in frame.iter_mut().enumerate() { *value = sample(channel); } } }, err, None),
+        cpal::SampleFormat::I16 => device.build_output_stream(config.into(), move |data: &mut [i16], _| { for frame in data.chunks_mut(channels) { for (channel, value) in frame.iter_mut().enumerate() { *value = (sample(channel)*32767.0) as i16; } } }, err, None),
+        cpal::SampleFormat::U16 => device.build_output_stream(config.into(), move |data: &mut [u16], _| { for frame in data.chunks_mut(channels) { for (channel, value) in frame.iter_mut().enumerate() { *value = ((sample(channel)+1.0)*32767.5) as u16; } } }, err, None),
         _ => return Err("Format audio tidak didukung".into()),
     }.map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?; Ok(stream)

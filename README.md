@@ -23,8 +23,8 @@
 | Card | On screen | Recipe | Target |
 | --- | --- | --- | --- |
 | White | Jernih dan merata | xorshift32, mapped to roughly ±1/30 | flat hiss |
-| Pink | Lembut dan seimbang | Paul Kellett filter, 7 states, gain 0.11 | 1/f, about -3 dB/octave |
-| Brown | Dalam dan hangat | leaky integrator at 5 Hz, input `sqrt(1 - a*a) * white` | about -6 dB/octave, no DC drift |
+| Pink | Lembut dan seimbang | Paul Kellett filter, 7 states, gain 0.33 | 1/f, about -3 dB/octave |
+| Brown | Dalam dan hangat | leaky integrator at 5 Hz, input `sqrt(1 - a*a) * white`, output gain 2.2 | about -6 dB/octave, no DC drift |
 
 ## Architecture
 
@@ -35,7 +35,7 @@ flowchart LR
     CB --> W[White<br/>xorshift32]
     CB --> P[Pink<br/>Paul Kellett filter]
     CB --> B[Brown<br/>leaky integrator 5 Hz]
-    W --> M[One mono sample<br/>copied to every channel]
+    W --> M[Separate generator and filter state<br/>for each output channel]
     P --> M
     B --> M
     M --> OUT[Default output device]
