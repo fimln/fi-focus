@@ -34,8 +34,9 @@ component WindowAction inherits Rectangle {
  touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 export component App inherits Window {
- title: "fi-focus"; icon: @image-url("icon.png"); preferred-width: 420px; preferred-height: 356px; min-width: 320px; min-height: 356px;
- no-frame: true; resize-border-width: 7px; background: root.show-window-border ? transparent : #111a1b;
+ title: "fi-focus"; icon: @image-url("icon.png"); preferred-width: 420px; preferred-height: 356px; min-width: root.show-window-border ? 420px : 320px; min-height: 356px;
+ max-width: root.show-window-border ? 420px : 65535px; max-height: root.show-window-border ? 356px : 65535px;
+ no-frame: true; resize-border-width: root.show-window-border ? 0px : 7px; background: root.show-window-border ? transparent : #111a1b;
  in-out property <int> active: 0;
  in property <bool> show-window-border: false;
  in property <bool> android-layout: false;
