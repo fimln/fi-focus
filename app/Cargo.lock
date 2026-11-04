@@ -1249,8 +1249,10 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "jni 0.21.1",
+ "raw-window-handle",
  "slint",
  "slint-build",
+ "windows",
  "windows-sys 0.61.2",
  "winresource",
 ]
@@ -4094,6 +4096,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

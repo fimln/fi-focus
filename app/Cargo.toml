@@ -10,7 +10,9 @@ crate-type = ["cdylib", "rlib"]
 cpal = { version = "0.18.2", features = ["realtime"] }
 slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-18", "accessibility"] }
 [target.'cfg(windows)'.dependencies]
-slint = { version = "=1.18.1", default-features = false, features = ["backend-winit", "renderer-skia"] }
+slint = { version = "=1.18.1", default-features = false, features = ["backend-winit", "renderer-skia", "raw-window-handle-06"] }
+raw-window-handle = "0.6"
+windows = { version = "0.62.2", features = ["Foundation", "Media", "Win32_System_WinRT"] }
 windows-sys = { version = "0.61", features = ["Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"

@@ -2,6 +2,7 @@ use std::sync::{Arc, atomic::{AtomicU8, AtomicBool, Ordering}};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use slint::ComponentHandle;
 slint::include_modules!();
+#[cfg(windows)] mod media_controls;
 // These notifications leave the stream usable; dropping it would turn a
 // recoverable scheduling/route event into a permanent playback stop.
 fn fatal_audio_error(kind: cpal::ErrorKind) -> bool {
@@ -80,6 +81,22 @@ fn start(minimize: impl Fn() + 'static) {
     let state = Arc::new(AtomicU8::new(0));
     let ui = App::new().unwrap();
     #[cfg(target_os="android")] ui.set_android_layout(true);
+    #[cfg(windows)]
+    {
+        ui.set_show_window_border(true);
+        use windows_sys::Win32::UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN}};
+        let size = slint::LogicalSize::new(420., 356.);
+        unsafe {
+            let physical = size.to_physical(GetDpiForSystem().max(96) as f32 / 96.);
+            ui.window().set_size(size);
+            ui.window().set_position(slint::PhysicalPosition::new(
+                (GetSystemMetrics(SM_CXSCREEN) - physical.width as i32) / 2,
+                (GetSystemMetrics(SM_CYSCREEN) - physical.height as i32) / 2,
+            ));
+        }
+    }
+    #[cfg(windows)]
+    let media = std::rc::Rc::new(std::cell::RefCell::new(None::<media_controls::MediaControls>));
     let stream = std::rc::Rc::new(std::cell::RefCell::new(None));
     let silent = Arc::new(AtomicBool::new(false));
     let failed = Arc::new(AtomicBool::new(false));
@@ -88,8 +105,9 @@ fn start(minimize: impl Fn() + 'static) {
     let selected_state = state.clone();
     let selected_silent = silent.clone();
     let selected_failed = failed.clone();
+    #[cfg(windows)] let selected_media = media.clone();
     ui.on_select(move |n| {
-        if !(1..=3).contains(&n) { return; }
+        if !(0..=3).contains(&n) { return; }
         let Some(ui) = weak.upgrade() else { return; };
         if selected_failed.swap(false, Ordering::Relaxed) {
             selected_stream.borrow_mut().take();
@@ -106,21 +124,34 @@ fn start(minimize: impl Fn() + 'static) {
                     eprintln!("Audio: {e}");
                     selected_state.store(0, Ordering::Relaxed);
                     ui.set_active(0);
+                    #[cfg(windows)] if let Some(media) = selected_media.borrow().as_ref() { media.update(0); }
                     return;
                 }
             }
         }
         ui.set_active(new as i32);
+        #[cfg(windows)] if let Some(media) = selected_media.borrow().as_ref() { media.update(new); }
     });
     let weak = ui.as_weak();
     let timer = slint::Timer::default();
+    #[cfg(windows)] let mut media_initialized = false;
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+        #[cfg(windows)] if !media_initialized {
+            if let Some(ui) = weak.upgrade() {
+                match media_controls::MediaControls::new(&ui) {
+                    Ok(Some(controls)) => { *media.borrow_mut() = Some(controls); media_initialized = true; }
+                    Ok(None) => {}
+                    Err(e) => { eprintln!("Media controls: {e}"); media_initialized = true; }
+                }
+            }
+        }
         if failed.swap(false, Ordering::Relaxed) {
             stream.borrow_mut().take();
             state.store(0, Ordering::Relaxed);
             if let Some(ui) = weak.upgrade() {
                 ui.set_active(0);
             }
+            #[cfg(windows)] if let Some(media) = media.borrow().as_ref() { media.update(0); }
         } else if state.load(Ordering::Relaxed) == 0 && silent.load(Ordering::Relaxed) {
             stream.borrow_mut().take();
         }
@@ -140,20 +171,6 @@ fn start(minimize: impl Fn() + 'static) {
         minimize();
     });
     ui.on_close_app(|| { let _ = slint::quit_event_loop(); });
-    #[cfg(windows)]
-    {
-        ui.set_show_window_border(true);
-        use windows_sys::Win32::UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN}};
-        let size = slint::LogicalSize::new(420., 356.);
-        unsafe {
-            let physical = size.to_physical(GetDpiForSystem().max(96) as f32 / 96.);
-            ui.window().set_size(size);
-            ui.window().set_position(slint::PhysicalPosition::new(
-                (GetSystemMetrics(SM_CXSCREEN) - physical.width as i32) / 2,
-                (GetSystemMetrics(SM_CYSCREEN) - physical.height as i32) / 2,
-            ));
-        }
-    }
     ui.run().unwrap();
 }
 #[cfg(windows)] pub fn run() { slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap(); start(|| {  }); }
