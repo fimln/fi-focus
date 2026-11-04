@@ -75,3 +75,11 @@ MIT. Keep the text with the code, as [LICENSE](LICENSE) says.
 Third-party pieces keep their own licenses: the original 5mdt noise reference in [LICENSE-5mdt.txt](LICENSE-5mdt.txt), plus CPAL, jni, windows-sys, and Slint. Details are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The Slint Royalty-free license asks for the badge below on public pages, so here it is.
 
 <p align="center"><a href="https://slint.dev"><img src="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png" width="200" alt="Made with Slint"></a></p>
+
+## References
+
+[1] J. T. Nigg, A. Bruton, M. B. Kozlowski, J. M. Johnstone, and S. L. Karalunas, “Systematic review and meta-analysis: Do white noise or pink noise help with task performance in youth with attention-deficit/hyperactivity disorder or with elevated attention problems?,” *J. Amer. Acad. Child Adolesc. Psychiatry*, vol. 63, no. 8, pp. 778–788, Aug. 2024, doi: [10.1016/j.jaac.2023.12.014](https://doi.org/10.1016/j.jaac.2023.12.014).
+
+[2] P. Kellett, “Pink noise filter,” 1999, reproduced in R. Whittle, “DSP generation of pink noise.” Accessed: Nov. 4, 2026. [Online]. Available: https://www.firstpr.com.au/dsp/pink-noise/
+
+[3] R. Bristow-Johnson, “Audio EQ cookbook,” W3C Working Group Note, Jun. 8, 2021. Accessed: Nov. 4, 2026. [Online]. Available: https://www.w3.org/TR/audio-eq-cookbook/

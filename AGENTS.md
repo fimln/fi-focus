@@ -28,6 +28,7 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - White memakai xorshift32 dengan seed awal tetap, dipetakan ke sekitar ±1/30. Pembagian 30 mengatur amplitudo, bukan frekuensi atau tempo.
 - Pink memakai filter Paul Kellett dengan tujuh state dan gain 0.33. `b[6]` diperbarui sesudah menghitung output. Target spektrum daya 1/f, sekitar −3 dB/oktaf.
 - Brown memakai integrator bocor dengan `a = exp(-2*pi*5/sample_rate)` dan input `sqrt(1-a*a) * white`. Batas bawah 5 Hz mencegah drift DC, mempertahankan karakter antar-sample-rate, dan menyetarakan RMS teoretis sebelum gain dengan white. Target audibel mendekati −6 dB/oktaf; bukan integrator ideal sampai DC.
+- Brown melewati high-pass Butterworth orde 2 pada 20 Hz (state f64 per kanal) untuk meredam sub-bass; gain tidak mengompensasi energi yang dibuang. Filter ini bukan jaminan SPL aman.
 - Gain Brown dikalikan 2.2 untuk keseimbangan level dengan Pink pada Windows dan Android.
 - RMS sama tidak berarti kenyaringan yang dirasakan sama. Gain Pink disesuaikan agar RMS mendekati white.
 - Pergantian mode memakai fade-out lalu fade-in sekitar 20 ms per tahap. State pink/brown dipertahankan saat berganti mode; stream baru memulai state dari nol.

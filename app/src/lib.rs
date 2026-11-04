@@ -2,12 +2,39 @@ use std::sync::{Arc, atomic::{AtomicU8, AtomicBool, Ordering}};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use slint::ComponentHandle;
 slint::include_modules!();
+// These notifications leave the stream usable; dropping it would turn a
+// recoverable scheduling/route event into a permanent playback stop.
+fn fatal_audio_error(kind: cpal::ErrorKind) -> bool {
+    !matches!(kind, cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied)
+}
+// RBJ Audio EQ Cookbook: Butterworth high-pass, Q = 1/sqrt(2).
+// f64 avoids cancellation near DC at high device sample rates.
+struct BrownHighPass {
+    b0: f64, a1: f64, a2: f64, z1: f64, z2: f64,
+}
+impl BrownHighPass {
+    fn new(sample_rate: u32) -> Self {
+        let w = 2.0 * std::f64::consts::PI * 20.0 / sample_rate as f64;
+        let alpha = w.sin() / std::f64::consts::SQRT_2;
+        let a0 = 1.0 + alpha;
+        Self { b0: (1.0 + w.cos()) / (2.0 * a0),
+            a1: -2.0 * w.cos() / a0, a2: (1.0 - alpha) / a0,
+            z1: 0.0, z2: 0.0 }
+    }
+    fn next(&mut self, input: f32) -> f32 {
+        let x = input as f64;
+        let y = self.b0 * x + self.z1;
+        self.z1 = -2.0 * self.b0 * x - self.a1 * y + self.z2;
+        self.z2 = self.b0 * x - self.a2 * y;
+        y as f32
+    }
+}
 fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>) -> Result<cpal::Stream, String> {
     let device = cpal::default_host().default_output_device().ok_or("Output audio tidak tersedia")?;
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     let channels = config.channels() as usize;
     let mut generators: Vec<_> = (0..channels).map(|channel| {
-        (0x12345678u32.wrapping_add((channel as u32).wrapping_mul(0x9e3779b9)), [0f32; 7], 0f32)
+        (0x12345678u32.wrapping_add((channel as u32).wrapping_mul(0x9e3779b9)), [0f32; 7], 0f32, BrownHighPass::new(config.sample_rate()))
     }).collect();
     // A 5 Hz leak prevents DC drift while preserving the audible brown slope.
     let brown_pole = (-2.0 * std::f32::consts::PI * 5.0 / config.sample_rate() as f32).exp();
@@ -27,17 +54,20 @@ fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>)
             silent.store(mode == 0, Ordering::Relaxed);
         }
         if mode == 0 { return 0.0; }
-        let (seed, b, brown) = &mut generators[channel];
+        let (seed, b, brown, high_pass) = &mut generators[channel];
         *seed ^= *seed << 13; *seed ^= *seed >> 17; *seed ^= *seed << 5;
         let w = (*seed as f32 / u32::MAX as f32 * 2.0 - 1.0) / 30.0;
         let value = match mode {
             1 => w,
             2 => { b[0]=0.99886*b[0]+w*0.0555179; b[1]=0.99332*b[1]+w*0.0750759; b[2]=0.969*b[2]+w*0.153852; b[3]=0.8665*b[3]+w*0.3104856; b[4]=0.55*b[4]+w*0.5329522; b[5]= -0.7616*b[5]-w*0.016898; let x=(b.iter().sum::<f32>()+w*0.5362)*0.33; b[6]=w*0.115926; x },
-            3 => { *brown=brown_pole* *brown+brown_input*w; *brown * 2.2 }, _ => 0.0
+            3 => { *brown=brown_pole* *brown+brown_input*w; high_pass.next(*brown) * 2.2 }, _ => 0.0
         };
         value * gain
     };
-    let err = move |e| { eprintln!("Audio: {e}"); failed.store(true, Ordering::Relaxed); };
+    let err = move |e: cpal::Error| {
+        // The backend may invoke this on its audio thread: no blocking stderr I/O.
+        if fatal_audio_error(e.kind()) { failed.store(true, Ordering::Relaxed); }
+    };
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_output_stream(config.into(), move |data: &mut [f32], _| { for frame in data.chunks_mut(channels) { for (channel, value) in frame.iter_mut().enumerate() { *value = sample(channel); } } }, err, None),
         cpal::SampleFormat::I16 => device.build_output_stream(config.into(), move |data: &mut [i16], _| { for frame in data.chunks_mut(channels) { for (channel, value) in frame.iter_mut().enumerate() { *value = (sample(channel)*32767.0) as i16; } } }, err, None),
@@ -142,3 +172,33 @@ fn start(minimize: impl Fn() + 'static) {
         if let Err(e) = result { eprintln!("Minimize: {e}"); }
     }); }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn brown_high_pass_rejects_dc_and_has_butterworth_cutoff() {
+        for rate in [44100, 48000, 96000] {
+            let mut filter = BrownHighPass::new(rate);
+            for _ in 0..rate { filter.next(1.0); }
+            assert!(filter.next(1.0).abs() < 1e-6);
+            let mut filter = BrownHighPass::new(rate);
+            let mut energy = 0.0f64;
+            for n in 0..rate * 2 {
+                let input = (2.0 * std::f64::consts::PI * 20.0 * n as f64 / rate as f64).sin();
+                let output = filter.next(input as f32);
+                if n >= rate { energy += (output as f64).powi(2); }
+            }
+            assert!((energy / rate as f64 - 0.25).abs() < 0.001);
+        }
+    }
+    #[test]
+    fn recoverable_notifications_keep_playing() {
+        for kind in [cpal::ErrorKind::Xrun, cpal::ErrorKind::DeviceChanged, cpal::ErrorKind::RealtimeDenied] {
+            assert!(!fatal_audio_error(kind));
+        }
+        for kind in [cpal::ErrorKind::DeviceNotAvailable, cpal::ErrorKind::StreamInvalidated, cpal::ErrorKind::BackendError] {
+            assert!(fatal_audio_error(kind));
+        }
+    }
+}
