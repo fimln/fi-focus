@@ -4,6 +4,7 @@ use slint::ComponentHandle;
 slint::include_modules!();
 #[cfg(windows)] mod media_controls;
 #[cfg(windows)] mod tray;
+#[cfg(windows)] mod instance;
 // These notifications leave the stream usable; dropping it would turn a
 // recoverable scheduling/route event into a permanent playback stop.
 fn fatal_audio_error(kind: cpal::ErrorKind) -> bool {
@@ -78,12 +79,13 @@ fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>)
     }.map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?; Ok(stream)
 }
-fn start(minimize: impl Fn() + 'static) {
+fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Instance) {
     let state = Arc::new(AtomicU8::new(0));
     let ui = App::new().unwrap();
     #[cfg(target_os="android")] ui.set_android_layout(true);
     #[cfg(windows)]
     {
+        tray::enable_full_repaint(&ui);
         ui.set_show_window_border(true);
         use windows_sys::Win32::UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN}};
         let size = slint::LogicalSize::new(420., 356.);
@@ -159,6 +161,9 @@ fn start(minimize: impl Fn() + 'static) {
                 }
             }
         }
+        #[cfg(windows)] if tray_installed && instance.take_activation_request() {
+            tray::restore();
+        }
         if failed.swap(false, Ordering::Relaxed) {
             stream.borrow_mut().take();
             state.store(0, Ordering::Relaxed);
@@ -189,7 +194,7 @@ fn start(minimize: impl Fn() + 'static) {
         // icon; otherwise it ends the process as before.
         #[cfg(windows)]
         if tray::run_in_tray() {
-            tray::hide();
+            let _ = tray::hide();
         } else {
             let _ = slint::quit_event_loop();
         }
@@ -203,7 +208,15 @@ fn start(minimize: impl Fn() + 'static) {
     ui.run().unwrap();
     #[cfg(windows)] drop(tray_cleanup);
 }
-#[cfg(windows)] pub fn run() { slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap(); start(|| {  }); }
+#[cfg(windows)] pub fn run() {
+    let instance = match instance::Instance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => { eprintln!("Instance: {e}"); return; }
+    };
+    slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap();
+    start(|| {}, instance);
+}
 #[cfg(not(windows))] pub fn run() { start(|| {}); }
 #[cfg(target_os="android")]
 #[unsafe(no_mangle)] fn android_main(app: slint::android::AndroidApp) { let activity_app = app.clone();

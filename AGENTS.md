@@ -14,6 +14,7 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - `app/src/main.rs`: entry point executable Windows.
 - `app/src/lib.rs`: generator noise, stream CPAL, state pemutaran, callback UI, entry point Android, dan minimize lintas platform.
 - `app/src/tray.rs`: ikon tray Windows (`Shell_NotifyIconW`), subkelas jendela untuk pesan tray dan tombol tutup native, menu Buka/Keluar, serta preferensi `HKCU\Software\fi-focus\RunInTray`.
+- `app/src/instance.rs`: named mutex Windows untuk satu instance per sesi dan event untuk memulihkan jendela saat aplikasi diluncurkan lagi.
 - `app/build.rs`: kompilasi `src/app.slint` dan resource ikon Windows.
 - `src/app.slint`: layout, tiga kartu suara, status error, tombol Minimalkan dan Tutup, sakelar tray, drag jendela Windows.
 - `src/icon.png`, `src/logo.png`, `app/icon.ico`: aset aplikasi.
@@ -42,6 +43,8 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - Android memanggil `MainActivity.minimizeApp()` lewat JNI; Kotlin menjalankan `moveTaskToBack(true)` di UI thread. Jangan menggantinya dengan quit atau finish activity.
 - Foreground service mempertahankan notifikasi pemutaran. Generator dan stream tetap dimiliki Rust, bukan service Kotlin. Kelanjutan audio di latar belakang harus diuji pada perangkat; keberhasilan build saja tidak membuktikannya.
 - Windows menampilkan ikon tray selama proses berjalan. Menu kanan berisi Buka fi-focus dan Keluar; klik kiri/pulihkan memunculkan jendela lagi. Sakelar `run-in-tray` (default mati) disimpan di `HKCU\Software\fi-focus\RunInTray`; saat mati, Tutup mengakhiri proses seperti sebelumnya. Saat hidup, Tutup menyembunyikan jendela dengan `ShowWindow(SW_HIDE)` native, bukan `Window::hide()` Slint, karena hide Slint menghancurkan jendela Winit dan mengakhiri event loop. Tombol tutup native dan Alt+F4 mengikuti sakelar yang sama lewat subkelas WndProc.
+- Windows hanya menjalankan satu instance per sesi. Peluncuran berikutnya mengirim event aktivasi lalu keluar sebelum membuat UI/audio; proses pertama memulihkan jendela dari timer UI, termasuk jika tersembunyi di tray.
+- Skia software pada Slint 1.18.1 memakai rendering notifier kosong agar setiap frame dirender penuh, sebagai workaround invalidasi Windows (slint-ui/slint#13568). Pertahankan hingga versi dengan perbaikan upstream tersedia dan teruji; `request_redraw()` saja tidak memaksa repaint penuh pada renderer parsial ini.
 - Tutup mengakhiri event loop bila sakelar tray mati. Pertahankan pemulihan error dengan mengetuk pilihan suara kembali.
 - Teks UI singkat, bahasa Indonesia. Pertahankan urutan white, pink, brown dan palet yang sudah ada.
 

@@ -8,12 +8,13 @@ use windows_sys::Win32::{
         RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD,
     }},
     UI::{
-        HiDpi::GetDpiForWindow,
-        Shell::{ExtractIconW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW},
+        HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+        Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW},
         WindowsAndMessaging::{
-            AppendMenuW, CallWindowProcW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,            GetSystemMetrics, GetWindowLongPtrW, HICON, IsIconic, LoadIconW, MF_SEPARATOR, MF_STRING,
-            PostMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
-            GWLP_WNDPROC, IDI_APPLICATION, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+            AppendMenuW, CallWindowProcW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
+            GetWindowLongPtrW, HICON, IsIconic, LoadIconW, LoadImageW, MF_SEPARATOR, MF_STRING,
+            PostMessageW, RegisterWindowMessageW, RemovePropW, SetForegroundWindow, SetPropW, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
+            GWLP_WNDPROC, IDI_APPLICATION, IMAGE_ICON, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
             WM_APP, WM_CLOSE, WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
         },
     },
@@ -39,13 +40,19 @@ thread_local! {
     static APP: RefCell<Option<slint::Weak<crate::App>>> = const { RefCell::new(None) };
     static ICON: Cell<(HICON, bool)> = const { Cell::new((ptr::null_mut(), false)) };
     static VISIBLE: Cell<bool> = const { Cell::new(false) };
+    static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
 }
 
 type WindowProcedure = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 
 unsafe extern "system" fn window_procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let mut handled = false;
-    if message == MESSAGE {
+    if message != 0 && message == TASKBAR_CREATED.with(Cell::get) {
+        VISIBLE.with(|visible| visible.set(false));
+        show();
+        if !VISIBLE.with(Cell::get) { let _ = restore(); }
+        handled = true;
+    } else if message == MESSAGE {
         match lparam as u32 {
             WM_LBUTTONUP | WM_LBUTTONDBLCLK => handled = restore(),
             WM_RBUTTONUP => handled = menu(),
@@ -67,15 +74,25 @@ unsafe extern "system" fn window_procedure(window: HWND, message: u32, wparam: W
     }
 }
 
-// Bring the hidden window back and drop the icon while it is visible.
-fn restore() -> bool {
+// Keep the icon installed while restoring the same window and audio stream.
+pub fn restore() -> bool {
     let Some(window) = CONTEXT.with(Cell::get).map(|context| context.window) else { return false; };
+    APP.with(|app| {
+        if let Some(ui) = app.borrow().as_ref().and_then(slint::Weak::upgrade) {
+            ui.window().set_minimized(false);
+        }
+    });
     // Showing the native window keeps Winit's state; Slint never hid it.
     unsafe {
         if IsIconic(window) != 0 { ShowWindow(window, SW_RESTORE); }
         ShowWindow(window, SW_SHOW);
         SetForegroundWindow(window);
     }
+    APP.with(|app| {
+        if let Some(ui) = app.borrow().as_ref().and_then(slint::Weak::upgrade) {
+            ui.window().request_redraw();
+        }
+    });
     true
 }
 
@@ -108,17 +125,22 @@ fn menu() -> bool {
 
 /// Hide the window while the process keeps running. Native visibility keeps
 /// Winit's window alive; hiding through Slint would destroy it and end the loop.
-pub fn hide() {
+pub fn hide() -> bool {
+    show();
+    // Never hide the only way back into the app if the shell rejected the icon.
+    if !VISIBLE.with(Cell::get) { return false; }
     if let Some(window) = CONTEXT.with(Cell::get).map(|context| context.window) {
         unsafe { ShowWindow(window, SW_HIDE); }
+        return true;
     }
+    false
 }
 
 fn close() -> bool {
     if !run_in_tray() {
         return false;
     }
-    hide();
+    let _ = hide();
     true
 }
 
@@ -128,6 +150,13 @@ fn quit() -> bool {
 }
 
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
+
+pub fn enable_full_repaint(ui: &crate::App) {
+    // Slint 1.18.1's Skia renderer disables partial rendering when a notifier is
+    // installed. Full frames avoid lost Windows surface contents after restore.
+    // Keep this workaround until upgrading to the fix in slint-ui/slint#13568.
+    ui.window().set_rendering_notifier(|_, _| {}).expect("Skia rendering notifier");
+}
 
 fn icon_data() -> NOTIFYICONDATAW {
     let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
@@ -146,14 +175,14 @@ fn icon_data() -> NOTIFYICONDATAW {
 }
 
 // The executable icon at the taskbar's small-icon size, or the shared system
-// icon if the executable has none; only an extracted icon is ours to destroy.
+// icon if the executable has none; only a loaded resource icon is ours to destroy.
 fn app_icon(window: HWND) -> (HICON, bool) {
     unsafe {
         let module = GetModuleHandleW(ptr::null());
         if !module.is_null() {
-            let base = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
-            let size = base * GetDpiForWindow(window).max(96) / 96;
-            let icon = ExtractIconW(module, ptr::null(), size);
+            let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForWindow(window).max(96)).max(16);
+            // winresource embeds the application icon as resource ID 1.
+            let icon = LoadImageW(module, 1usize as *const u16, IMAGE_ICON, size, size, 0) as HICON;
             if !icon.is_null() {
                 return (icon, true);
             }
@@ -180,14 +209,20 @@ pub fn install(ui: &crate::App) -> Result<(), String> {
     let current = unsafe { GetWindowLongPtrW(window, GWLP_WNDPROC) };
     let previous = if current == 0 { None } else { Some(unsafe { std::mem::transmute_copy::<isize, unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>(&current) }) };
     CONTEXT.with(|context| context.set(Some(Context { window, previous })));
+    unsafe { SetPropW(window, wide(crate::instance::WINDOW_PROPERTY).as_ptr(), 1usize as _); }
     APP.with(|app| *app.borrow_mut() = Some(ui.as_weak()));
     ICON.with(|cell| cell.set((icon, owned)));
+    TASKBAR_CREATED.with(|message| message.set(unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) }));
     let replaced = unsafe { SetWindowLongPtrW(window, GWLP_WNDPROC, window_procedure as *const () as usize as isize) };
     if previous.is_some() && replaced == 0 {
         reset();
         return Err("Tidak dapat memasang ikon tray".into());
     }
     show();
+    if !VISIBLE.with(Cell::get) {
+        reset();
+        return Err("Tidak dapat menampilkan ikon tray".into());
+    }
     Ok(())
 }
 
@@ -207,6 +242,7 @@ fn remove() {
 fn reset() {
     remove();
     if let Some(context) = CONTEXT.with(Cell::get) {
+        unsafe { RemovePropW(context.window, wide(crate::instance::WINDOW_PROPERTY).as_ptr()); }
         unsafe { SetWindowLongPtrW(context.window, GWLP_WNDPROC, context.previous.map_or(0, |previous| previous as isize)); }
     }
     let (icon, owned) = ICON.with(Cell::get);
@@ -215,6 +251,7 @@ fn reset() {
     }
     ICON.with(|cell| cell.set((ptr::null_mut(), false)));
     CONTEXT.with(|context| context.set(None));
+    TASKBAR_CREATED.with(|message| message.set(0));
     APP.with(|app| app.borrow_mut().take());
 }
 
@@ -252,5 +289,102 @@ pub fn remember(run_in_tray: bool) {
     unsafe {
         RegSetKeyValueW(HKEY_CURRENT_USER, wide(REGISTRY_KEY).as_ptr(), wide(VALUE).as_ptr(),
             REG_DWORD, &value as *const u32 as *const _, std::mem::size_of::<u32>() as u32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_icon_uses_embedded_application_resource() {
+        let (icon, owned) = app_icon(ptr::null_mut());
+        assert!(!icon.is_null());
+        assert!(owned, "The embedded application icon must load without the generic fallback");
+        unsafe { DestroyIcon(icon); }
+    }
+
+    #[test]
+    fn tray_restore_keeps_window_and_selection() {
+        use windows_sys::Win32::{
+            Foundation::RECT,
+            Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, GetDC, GetPixel, InvalidateRect, ReleaseDC},
+            UI::WindowsAndMessaging::{GetClientRect, IsWindowVisible},
+        };
+
+        fn pixels(window: HWND, scale: f32) -> Vec<u32> {
+            let dc = unsafe { GetDC(window) };
+            assert!(!dc.is_null());
+            let result = [(10., 10.), (10., 150.), (410., 150.), (10., 345.), (200., 270.)]
+                .map(|(x, y)| unsafe { GetPixel(dc, (x * scale) as i32, (y * scale) as i32) }).to_vec();
+            unsafe { ReleaseDC(window, dc); }
+            assert!(!result.contains(&u32::MAX), "The test window must have readable pixels");
+            result
+        }
+
+        slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap();
+        let ui = crate::App::new().unwrap();
+        enable_full_repaint(&ui);
+        ui.set_show_window_border(true);
+        ui.set_active(2);
+        let name = format!("Local\\fi-focus-tray-test-{}", std::process::id());
+        let instance = crate::instance::Instance::acquire_named(&name).unwrap().unwrap();
+        let weak = ui.as_weak();
+        let timer = slint::Timer::default();
+        let mut stage = 0;
+        let mut original = ptr::null_mut();
+        let mut reference = Vec::new();
+        timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+            let ui = weak.upgrade().unwrap();
+            if stage == 0 {
+                install(&ui).unwrap();
+                original = CONTEXT.with(Cell::get).unwrap().window;
+            }
+            if stage == 10 {
+                reference = pixels(original, ui.window().scale_factor());
+                assert!(hide());
+                assert_eq!(unsafe { IsWindowVisible(original) }, 0);
+            } else if stage == 12 {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--ignored", "--exact", "instance::tests::secondary_process", "--nocapture"])
+                    .env("FI_FOCUS_TEST_INSTANCE", &name).status().unwrap();
+                assert!(status.success());
+                assert!(instance.take_activation_request());
+                assert!(restore());
+            } else if stage == 14 || stage == 18 || stage == 24 {
+                assert_ne!(unsafe { IsWindowVisible(original) }, 0);
+                assert_eq!(unsafe { IsIconic(original) }, 0);
+                assert_eq!(CONTEXT.with(Cell::get).unwrap().window, original);
+                assert_eq!(ui.get_active(), 2);
+                assert!(VISIBLE.with(Cell::get));
+                assert_eq!(pixels(original, ui.window().scale_factor()), reference, "The entire client must be repainted");
+                if stage == 14 {
+                    // Simulate client contents lost by Windows, then request an OS
+                    // repaint without changing any Slint properties or geometry.
+                    unsafe {
+                        let dc = GetDC(original);
+                        let brush = CreateSolidBrush(0x00ff00ff);
+                        let mut rect: RECT = std::mem::zeroed();
+                        assert_ne!(GetClientRect(original, &mut rect), 0);
+                        FillRect(dc, &rect, brush);
+                        DeleteObject(brush);
+                        ReleaseDC(original, dc);
+                        InvalidateRect(original, ptr::null(), 0);
+                    }
+                }
+            } else if stage == 20 {
+                ui.window().set_minimized(true);
+                assert!(hide());
+            } else if stage == 22 {
+                assert!(restore());
+            }
+            stage += 1;
+            if stage == 25 { slint::quit_event_loop().unwrap(); }
+        });
+        let cleanup = guard();
+        ui.run().unwrap();
+        drop(cleanup);
+        assert!(CONTEXT.with(Cell::get).is_none());
+        assert!(!VISIBLE.with(Cell::get));
     }
 }
