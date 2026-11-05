@@ -3,6 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use slint::ComponentHandle;
 slint::include_modules!();
 #[cfg(windows)] mod media_controls;
+#[cfg(windows)] mod tray;
 // These notifications leave the stream usable; dropping it would turn a
 // recoverable scheduling/route event into a permanent playback stop.
 fn fatal_audio_error(kind: cpal::ErrorKind) -> bool {
@@ -95,6 +96,7 @@ fn start(minimize: impl Fn() + 'static) {
             ));
         }
     }
+    #[cfg(windows)] ui.set_run_in_tray(tray::run_in_tray());
     #[cfg(windows)]
     let media = std::rc::Rc::new(std::cell::RefCell::new(None::<media_controls::MediaControls>));
     let stream = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -135,7 +137,19 @@ fn start(minimize: impl Fn() + 'static) {
     let weak = ui.as_weak();
     let timer = slint::Timer::default();
     #[cfg(windows)] let mut media_initialized = false;
+    #[cfg(windows)] let mut tray_installed = false;
+    #[cfg(windows)] let mut tray_failed = false;
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+        #[cfg(windows)] if !tray_installed && !tray_failed {
+            // Winit materializes the window on the first event loop turn, so the
+            // first tick sees the handle; a failed install is not retried.
+            if let Some(ui) = weak.upgrade() {
+                match tray::install(&ui) {
+                    Ok(()) => { tray_installed = true; }
+                    Err(e) => { eprintln!("Tray: {e}"); tray_failed = true; }
+                }
+            }
+        }
         #[cfg(windows)] if !media_initialized {
             if let Some(ui) = weak.upgrade() {
                 match media_controls::MediaControls::new(&ui) {
@@ -170,8 +184,24 @@ fn start(minimize: impl Fn() + 'static) {
         #[cfg(not(windows))] let _ = &minimized_ui;
         minimize();
     });
-    ui.on_close_app(|| { let _ = slint::quit_event_loop(); });
+    ui.on_close_app(|| {
+        // With the toggle on, Tutup leaves playback running next to the tray
+        // icon; otherwise it ends the process as before.
+        #[cfg(windows)]
+        if tray::run_in_tray() {
+            tray::hide();
+        } else {
+            let _ = slint::quit_event_loop();
+        }
+        #[cfg(not(windows))] let _ = slint::quit_event_loop();
+    });
+    // The remembered toggle only decides what Tutup does; the icon itself stays
+    // next to the clock for as long as the app runs.
+    #[cfg(windows)] ui.on_set_run_in_tray(tray::remember);
+    #[cfg(not(windows))] ui.on_set_run_in_tray(|_| {});
+    #[cfg(windows)] let tray_cleanup = tray::guard();
     ui.run().unwrap();
+    #[cfg(windows)] drop(tray_cleanup);
 }
 #[cfg(windows)] pub fn run() { slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap(); start(|| {  }); }
 #[cfg(not(windows))] pub fn run() { start(|| {}); }

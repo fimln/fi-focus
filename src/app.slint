@@ -33,14 +33,43 @@ component WindowAction inherits Rectangle {
  Tooltip { text: @markdown("\{root.label}"); }
  touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
+component TrayToggle inherits Rectangle {
+ in property <bool> on;
+ in property <color> accent;
+ callback toggled(bool);
+ width: 48px; height: 48px; border-radius: 16px;
+ border-width: 1px; border-color: touch.has-hover ? root.accent.with-alpha(0.7) : #354344;
+ background: touch.pressed ? root.accent.with-alpha(0.28) : touch.has-hover ? #283334 : #1b2627;
+ animate background, border-color { duration: 220ms; easing: ease-in-out; }
+ // A compact switch: the pill fills with the accent while the tray mode is on.
+ track := Rectangle {
+  x: (parent.width - 36px)/2; y: (parent.height - 20px)/2; width: 36px; height: 20px; border-radius: 10px;
+  background: root.on ? root.accent.with-alpha(0.85) : #2a3637;
+  border-width: 1px; border-color: root.on ? root.accent : #3d4b4c;
+  animate background, border-color { duration: 160ms; }
+  thumb := Rectangle {
+   x: root.on ? 18px : 2px; y: 2px; width: 14px; height: 14px; border-radius: 7px;
+   background: root.on ? #111a1b : #9aabaa;
+   animate x, background { duration: 160ms; easing: ease-in-out; }
+  }
+ }
+ accessible-role: button; accessible-label: root.on ? "Matikan tray saat Tutup" : "Jalankan di tray saat Tutup";
+ focus := FocusScope {
+  key-pressed(e) => { if e.text == " " || e.text == "\n" { root.toggled(!root.on); return accept; } return reject; }
+ }
+ if focus.has-focus : Rectangle { x: -3px; y: -3px; width: parent.width + 6px; height: parent.height + 6px; border-radius: 19px; border-width: 1px; border-color: root.accent; background: transparent; }
+ Tooltip { text: @markdown("Jalankan di tray saat Tutup"); }
+ touch := TouchArea { clicked => { root.toggled(!root.on); } }
+}
 export component App inherits Window {
  title: "fi-focus"; icon: @image-url("icon.png"); preferred-width: 420px; preferred-height: 356px; min-width: root.show-window-border ? 420px : 320px; min-height: 356px;
  max-width: root.show-window-border ? 420px : 65535px; max-height: root.show-window-border ? 356px : 65535px;
  no-frame: true; resize-border-width: root.show-window-border ? 0px : 7px; background: root.show-window-border ? transparent : #111a1b;
  in-out property <int> active: 0;
+ in-out property <bool> run-in-tray: false;
  in property <bool> show-window-border: false;
  in property <bool> android-layout: false;
- callback minimize-app(); callback select(int); callback close-app(); callback drag(float, float);
+ callback minimize-app(); callback select(int); callback close-app(); callback drag(float, float); callback set-run-in-tray(bool);
  property <color> accent: active == 2 ? #edb4c7 : active == 3 ? #ceaa88 : #dce8e7;
  animate accent { duration: 450ms; easing: ease-in-out; }
  Rectangle { width: parent.width; height: parent.height; background: #111a1b; border-radius: root.show-window-border ? 12px : 0px; }
@@ -63,6 +92,7 @@ export component App inherits Window {
   TouchArea { moved => { if self.pressed { root.drag((self.mouse-x - self.pressed-x)/1px, (self.mouse-y - self.pressed-y)/1px); } } }
  }
  WindowAction { label: "Minimalkan"; icon: @image-url("minimize.svg"); accent: root.accent; clicked => { root.minimize-app(); } }
+ TrayToggle { on: root.run-in-tray; accent: root.accent; toggled(on) => { root.run-in-tray = on; root.set-run-in-tray(on); } }
  WindowAction { label: "Tutup"; icon: @image-url("close.svg"); accent: root.accent; clicked => { root.close-app(); } }
  }
 }
