@@ -5,7 +5,7 @@ use raw_window_handle::HasWindowHandle;
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     System::{LibraryLoader::GetModuleHandleW, Registry::{
-        RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD,
+        RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RRF_RT_REG_DWORD,
     }},
     UI::{
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
@@ -26,6 +26,7 @@ const OPEN: usize = 1;
 const QUIT: usize = 2;
 const REGISTRY_KEY: &str = r"Software\fi-focus";
 const VALUE: &str = "RunInTray";
+const STARTUP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// State the tray window procedure needs. It stays on the UI thread because
 /// Winit created the window there and Slint state may only be touched there.
@@ -284,17 +285,80 @@ pub fn run_in_tray() -> bool {
     status == 0 && value != 0
 }
 
-pub fn remember(run_in_tray: bool) {
+// Like fi-whisper, start at user login without requiring administrator rights.
+fn set_auto_startup(key: &str, enabled: bool) -> Result<(), String> {
+    let status = if enabled {
+        use std::os::windows::ffi::OsStrExt;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command: Vec<u16> = std::iter::once(b'"' as u16)
+            .chain(exe.as_os_str().encode_wide()).chain("\" --tray\0".encode_utf16()).collect();
+        unsafe {
+            RegSetKeyValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide("fi-focus").as_ptr(),
+                REG_SZ, command.as_ptr().cast(), (command.len() * 2) as u32)
+        }
+    } else {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide("fi-focus").as_ptr()) }
+    };
+    if status == 0 || (!enabled && status == 2) { Ok(()) }
+    else { Err(format!("Auto-startup gagal: {status}")) }
+}
+
+pub fn sync_startup() -> Result<(), String> { set_auto_startup(STARTUP_KEY, run_in_tray()) }
+
+pub fn remember(run_in_tray: bool) -> Result<(), String> {
+    set_auto_startup(STARTUP_KEY, run_in_tray)?;
     let value = u32::from(run_in_tray);
-    unsafe {
+    let status = unsafe {
         RegSetKeyValueW(HKEY_CURRENT_USER, wide(REGISTRY_KEY).as_ptr(), wide(VALUE).as_ptr(),
-            REG_DWORD, &value as *const u32 as *const _, std::mem::size_of::<u32>() as u32);
+            REG_DWORD, &value as *const u32 as *const _, std::mem::size_of::<u32>() as u32)
+    };
+    if status != 0 {
+        let _ = sync_startup();
+        return Err(format!("Pengaturan tray gagal disimpan: {status}"));
     }
+    Ok(())
+}
+
+pub fn report_settings_error(error: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let window = CONTEXT.with(Cell::get).map_or(ptr::null_mut(), |context| context.window);
+    unsafe { MessageBoxW(window, wide(error).as_ptr(), wide("fi-focus").as_ptr(), MB_OK | MB_ICONERROR); }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_registers_quoted_executable_and_can_be_disabled_repeatedly() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Registry::{RegDeleteKeyW, RRF_RT_REG_SZ};
+        let key = format!(r"Software\fi-focus-startup-test-{}", std::process::id());
+        set_auto_startup(&key, false).unwrap();
+        set_auto_startup(&key, true).unwrap();
+        let mut command = vec![0u16; 32768];
+        let mut size = (command.len() * 2) as u32;
+        let status = unsafe {
+            RegGetValueW(HKEY_CURRENT_USER, wide(&key).as_ptr(), wide("fi-focus").as_ptr(), RRF_RT_REG_SZ,
+                ptr::null_mut(), command.as_mut_ptr().cast(), &mut size)
+        };
+        let exe = std::env::current_exe().unwrap();
+        let expected: Vec<u16> = std::iter::once(b'"' as u16)
+            .chain(exe.as_os_str().encode_wide()).chain("\" --tray\0".encode_utf16()).collect();
+        let removed = set_auto_startup(&key, false);
+        let repeated = set_auto_startup(&key, false);
+        let mut remaining_size = 0;
+        let remaining = unsafe {
+            RegGetValueW(HKEY_CURRENT_USER, wide(&key).as_ptr(), wide("fi-focus").as_ptr(), RRF_RT_REG_SZ,
+                ptr::null_mut(), ptr::null_mut(), &mut remaining_size)
+        };
+        unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, wide(&key).as_ptr()); }
+        assert_eq!(status, 0);
+        assert_eq!(&command[..size as usize / 2], expected);
+        removed.unwrap();
+        repeated.unwrap();
+        assert_eq!(remaining, 2);
+    }
 
     #[test]
     fn tray_icon_uses_embedded_application_resource() {

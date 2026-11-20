@@ -48,18 +48,18 @@ component TrayToggle inherits Rectangle {
   border-width: 1px; border-color: root.on ? root.accent : #3d4b4c;
   animate background, border-color { duration: 160ms; }
   thumb := Rectangle {
-   x: root.on ? 18px : 2px; y: 2px; width: 14px; height: 14px; border-radius: 7px;
+   x: root.on ? 18px : 2px; y: (parent.height - self.height)/2; width: 14px; height: 14px; border-radius: 7px;
    background: root.on ? #111a1b : #9aabaa;
    animate x, background { duration: 160ms; easing: ease-in-out; }
   }
  }
- accessible-role: button; accessible-label: root.on ? "Matikan tray saat Tutup" : "Jalankan di tray saat Tutup";
+ accessible-role: button; accessible-label: root.on ? "Matikan tray dan startup otomatis" : "Aktifkan tray dan startup otomatis";
  forward-focus: focus;
  focus := FocusScope {
   key-pressed(e) => { if e.text == " " || e.text == "\n" { root.toggled(!root.on); return accept; } return reject; }
  }
  if focus.has-focus : Rectangle { x: -3px; y: -3px; width: parent.width + 6px; height: parent.height + 6px; border-radius: 19px; border-width: 1px; border-color: root.accent; background: transparent; }
- Tooltip { text: @markdown("Jalankan di tray saat Tutup"); }
+ Tooltip { text: @markdown("Tray saat Tutup dan mulai otomatis saat login Windows"); }
  touch := TouchArea { mouse-cursor: pointer; clicked => { root.toggled(!root.on); } }
 }
 export component App inherits Window {

@@ -99,6 +99,7 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         }
     }
     #[cfg(windows)] ui.set_run_in_tray(tray::run_in_tray());
+    #[cfg(windows)] if let Err(e) = tray::sync_startup() { tray::report_settings_error(&e); }
     #[cfg(windows)]
     let media = std::rc::Rc::new(std::cell::RefCell::new(None::<media_controls::MediaControls>));
     let stream = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -139,16 +140,19 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
     let weak = ui.as_weak();
     let timer = slint::Timer::default();
     #[cfg(windows)] let mut media_initialized = false;
-    #[cfg(windows)] let mut tray_installed = false;
-    #[cfg(windows)] let mut tray_failed = false;
+    #[cfg(windows)] let mut tray_initialized = false;
+    #[cfg(windows)] let mut start_in_tray = tray::run_in_tray() && std::env::args_os().any(|arg| arg == "--tray");
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
-        #[cfg(windows)] if !tray_installed && !tray_failed {
+        #[cfg(windows)] if !tray_initialized {
             // Winit materializes the window on the first event loop turn, so the
             // first tick sees the handle; a failed install is not retried.
             if let Some(ui) = weak.upgrade() {
+                tray_initialized = true;
                 match tray::install(&ui) {
-                    Ok(()) => { tray_installed = true; }
-                    Err(e) => { eprintln!("Tray: {e}"); tray_failed = true; }
+                    Ok(()) => {
+                        if start_in_tray { tray::hide(); start_in_tray = false; }
+                    }
+                    Err(e) => eprintln!("Tray: {e}"),
                 }
             }
         }
@@ -161,7 +165,7 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
                 }
             }
         }
-        #[cfg(windows)] if tray_installed && instance.take_activation_request() {
+        #[cfg(windows)] if instance.take_activation_request() {
             tray::restore();
         }
         if failed.swap(false, Ordering::Relaxed) {
@@ -175,18 +179,18 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
             stream.borrow_mut().take();
         }
     });
+    #[cfg(windows)] {
     let drag_ui = ui.as_weak();
     ui.on_drag(move |x, y| {
-        #[cfg(windows)] if let Some(ui) = drag_ui.upgrade() {
+        if let Some(ui) = drag_ui.upgrade() {
             let pos = ui.window().position(); let scale = ui.window().scale_factor();
             ui.window().set_position(slint::PhysicalPosition::new(pos.x + (x*scale) as i32, pos.y + (y*scale) as i32));
         }
-        #[cfg(not(windows))] let _ = (&drag_ui, x, y);
     });
-    let minimized_ui = ui.as_weak();
+    }
+    #[cfg(windows)] let minimized_ui = ui.as_weak();
     ui.on_minimize_app(move || {
         #[cfg(windows)] if let Some(ui) = minimized_ui.upgrade() { ui.window().set_minimized(true); }
-        #[cfg(not(windows))] let _ = &minimized_ui;
         minimize();
     });
     ui.on_close_app(|| {
@@ -200,10 +204,16 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         }
         #[cfg(not(windows))] let _ = slint::quit_event_loop();
     });
-    // The remembered toggle only decides what Tutup does; the icon itself stays
-    // next to the clock for as long as the app runs.
-    #[cfg(windows)] ui.on_set_run_in_tray(tray::remember);
-    #[cfg(not(windows))] ui.on_set_run_in_tray(|_| {});
+    // The same toggle controls close-to-tray and startup at Windows login.
+    #[cfg(windows)] {
+        let weak = ui.as_weak();
+        ui.on_set_run_in_tray(move |enabled| {
+            if let Err(e) = tray::remember(enabled) {
+                if let Some(ui) = weak.upgrade() { ui.set_run_in_tray(tray::run_in_tray()); }
+                tray::report_settings_error(&e);
+            }
+        });
+    }
     #[cfg(windows)] let tray_cleanup = tray::guard();
     ui.run().unwrap();
     #[cfg(windows)] drop(tray_cleanup);
