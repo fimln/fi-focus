@@ -79,13 +79,12 @@ fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>)
     }.map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?; Ok(stream)
 }
-fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Instance) {
+fn start(minimize: impl Fn() + 'static, #[cfg(windows)] mut instance: instance::Instance) {
     let state = Arc::new(AtomicU8::new(0));
     let ui = App::new().unwrap();
     #[cfg(target_os="android")] ui.set_android_layout(true);
     #[cfg(windows)]
     {
-        tray::enable_full_repaint(&ui);
         ui.set_show_window_border(true);
         use windows_sys::Win32::UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN}};
         let size = slint::LogicalSize::new(420., 356.);
@@ -110,6 +109,8 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
     let selected_state = state.clone();
     let selected_silent = silent.clone();
     let selected_failed = failed.clone();
+    let timer = std::rc::Rc::new(slint::Timer::default());
+    let playback_timer = timer.clone();
     #[cfg(windows)] let selected_media = media.clone();
     ui.on_select(move |n| {
         if !(0..=3).contains(&n) { return; }
@@ -124,7 +125,10 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         selected_silent.store(false, Ordering::Relaxed);
         if new != 0 && selected_stream.borrow().is_none() {
             match audio(selected_state.clone(), selected_silent.clone(), selected_failed.clone()) {
-                Ok(audio_stream) => { *selected_stream.borrow_mut() = Some(audio_stream); }
+                Ok(audio_stream) => {
+                    *selected_stream.borrow_mut() = Some(audio_stream);
+                    playback_timer.restart();
+                }
                 Err(e) => {
                     eprintln!("Audio: {e}");
                     selected_state.store(0, Ordering::Relaxed);
@@ -138,7 +142,7 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         #[cfg(windows)] if let Some(media) = selected_media.borrow().as_ref() { media.update(new); }
     });
     let weak = ui.as_weak();
-    let timer = slint::Timer::default();
+    let weak_timer = std::rc::Rc::downgrade(&timer);
     #[cfg(windows)] let mut media_initialized = false;
     #[cfg(windows)] let mut tray_initialized = false;
     #[cfg(windows)] let mut start_in_tray = tray::run_in_tray() && std::env::args_os().any(|arg| arg == "--tray");
@@ -148,7 +152,7 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
             // first tick sees the handle; a failed install is not retried.
             if let Some(ui) = weak.upgrade() {
                 tray_initialized = true;
-                match tray::install(&ui) {
+                match tray::install(&ui, &mut instance) {
                     Ok(()) => {
                         if start_in_tray { tray::hide(); start_in_tray = false; }
                     }
@@ -165,9 +169,6 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
                 }
             }
         }
-        #[cfg(windows)] if instance.take_activation_request() {
-            tray::restore();
-        }
         if failed.swap(false, Ordering::Relaxed) {
             stream.borrow_mut().take();
             state.store(0, Ordering::Relaxed);
@@ -178,7 +179,12 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         } else if state.load(Ordering::Relaxed) == 0 && silent.load(Ordering::Relaxed) {
             stream.borrow_mut().take();
         }
+        #[cfg(windows)] if !tray_initialized || !media_initialized { return; }
+        if stream.borrow().is_none() {
+            if let Some(timer) = weak_timer.upgrade() { timer.stop(); }
+        }
     });
+    #[cfg(not(windows))] timer.stop();
     #[cfg(windows)] {
     let drag_ui = ui.as_weak();
     ui.on_drag(move |x, y| {
@@ -224,7 +230,7 @@ fn start(minimize: impl Fn() + 'static, #[cfg(windows)] instance: instance::Inst
         Ok(None) => return,
         Err(e) => { eprintln!("Instance: {e}"); return; }
     };
-    slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap();
+    slint::BackendSelector::new().backend_name("winit-software".into()).select().unwrap();
     start(|| {}, instance);
 }
 #[cfg(not(windows))] pub fn run() { start(|| {}); }

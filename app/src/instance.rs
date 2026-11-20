@@ -1,11 +1,12 @@
 use std::{io, ptr};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, WAIT_OBJECT_0},
-    System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject},
-    UI::WindowsAndMessaging::{AllowSetForegroundWindow, EnumWindows, GetPropW, GetWindowThreadProcessId},
+    Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM},
+    System::Threading::{CreateEventW, CreateMutexW, RegisterWaitForSingleObject, SetEvent, UnregisterWaitEx, INFINITE, WT_EXECUTEDEFAULT},
+    UI::WindowsAndMessaging::{AllowSetForegroundWindow, EnumWindows, GetPropW, GetWindowThreadProcessId, PostMessageW, WM_APP},
 };
 
 pub const WINDOW_PROPERTY: &str = "fi-focus.MainWindow";
+pub const ACTIVATE_WINDOW: u32 = WM_APP + 2;
 
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -15,6 +16,20 @@ impl Drop for Handle {
 pub struct Instance {
     _mutex: Handle,
     activation: Handle,
+    wait: HANDLE,
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        if !self.wait.is_null() {
+            // Drain callbacks before closing their event.
+            unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE); }
+        }
+    }
+}
+
+unsafe extern "system" fn notify_window(window: *mut core::ffi::c_void, _: bool) {
+    unsafe { PostMessageW(window, ACTIVATE_WINDOW, 0, 0); }
 }
 
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
@@ -42,7 +57,7 @@ impl Instance {
         let mutex = unsafe { CreateMutexW(ptr::null(), 0, wide(&format!("{name}.Instance")).as_ptr()) };
         if mutex.is_null() { return Err(io::Error::last_os_error()); }
         let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-        let instance = Self { _mutex: Handle(mutex), activation };
+        let instance = Self { _mutex: Handle(mutex), activation, wait: ptr::null_mut() };
         if existing {
             unsafe { EnumWindows(Some(allow_foreground), 0); }
             if unsafe { SetEvent(instance.activation.0) } == 0 { return Err(io::Error::last_os_error()); }
@@ -51,7 +66,18 @@ impl Instance {
         Ok(Some(instance))
     }
 
-    pub fn take_activation_request(&self) -> bool {
+    pub fn watch_activation(&mut self, window: HWND) -> io::Result<()> {
+        let mut wait = ptr::null_mut();
+        let ok = unsafe { RegisterWaitForSingleObject(&mut wait, self.activation.0,
+            Some(notify_window), window, INFINITE, WT_EXECUTEDEFAULT) };
+        if ok == 0 { return Err(io::Error::last_os_error()); }
+        self.wait = wait;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn take_activation_request(&self) -> bool {
+        use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
         unsafe { WaitForSingleObject(self.activation.0, 0) == WAIT_OBJECT_0 }
     }
 }

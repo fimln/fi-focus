@@ -4,6 +4,7 @@ use slint::ComponentHandle;
 use raw_window_handle::HasWindowHandle;
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Graphics::Gdi::{GetUpdateRect, InvalidateRect},
     System::{LibraryLoader::GetModuleHandleW, Registry::{
         RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RRF_RT_REG_DWORD,
     }},
@@ -15,7 +16,7 @@ use windows_sys::Win32::{
             GetWindowLongPtrW, HICON, IsIconic, LoadIconW, LoadImageW, MF_SEPARATOR, MF_STRING,
             PostMessageW, RegisterWindowMessageW, RemovePropW, SetForegroundWindow, SetPropW, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
             GWLP_WNDPROC, IDI_APPLICATION, IMAGE_ICON, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-            WM_APP, WM_CLOSE, WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+            WM_APP, WM_CLOSE, WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP,
         },
     },
 };
@@ -53,6 +54,21 @@ unsafe extern "system" fn window_procedure(window: HWND, message: u32, wparam: W
         show();
         if !VISIBLE.with(Cell::get) { let _ = restore(); }
         handled = true;
+    } else if message == WM_PAINT && unsafe { GetUpdateRect(window, ptr::null_mut(), 0) } != 0 {
+        // Winit requests animation frames with RDW_INTERNALPAINT. An actual OS
+        // update region means Windows may have discarded the presented pixels.
+        // Mark the surface dirty before forwarding WM_PAINT to Winit.
+        use slint::private_unstable_api::re_exports::{LogicalRect, WindowInner};
+        APP.with(|app| {
+            if let Some(ui) = app.borrow().as_ref().and_then(slint::Weak::upgrade) {
+                let window = ui.window();
+                let size = window.size().to_logical(window.scale_factor());
+                let area = LogicalRect::from_size((size.width, size.height).into());
+                WindowInner::from_pub(window).window_adapter().renderer().mark_dirty_region(area.into());
+            }
+        });
+    } else if message == crate::instance::ACTIVATE_WINDOW {
+        handled = restore();
     } else if message == MESSAGE {
         match lparam as u32 {
             WM_LBUTTONUP | WM_LBUTTONDBLCLK => handled = restore(),
@@ -88,12 +104,8 @@ pub fn restore() -> bool {
         if IsIconic(window) != 0 { ShowWindow(window, SW_RESTORE); }
         ShowWindow(window, SW_SHOW);
         SetForegroundWindow(window);
+        InvalidateRect(window, ptr::null(), 0);
     }
-    APP.with(|app| {
-        if let Some(ui) = app.borrow().as_ref().and_then(slint::Weak::upgrade) {
-            ui.window().request_redraw();
-        }
-    });
     true
 }
 
@@ -152,13 +164,6 @@ fn quit() -> bool {
 
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
 
-pub fn enable_full_repaint(ui: &crate::App) {
-    // Slint 1.18.1's Skia renderer disables partial rendering when a notifier is
-    // installed. Full frames avoid lost Windows surface contents after restore.
-    // Keep this workaround until upgrading to the fix in slint-ui/slint#13568.
-    ui.window().set_rendering_notifier(|_, _| {}).expect("Skia rendering notifier");
-}
-
 fn icon_data() -> NOTIFYICONDATAW {
     let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -193,7 +198,7 @@ fn app_icon(window: HWND) -> (HICON, bool) {
 }
 
 /// Install the icon and intercept the window procedure once the window exists.
-pub fn install(ui: &crate::App) -> Result<(), String> {
+pub fn install(ui: &crate::App, instance: &mut crate::instance::Instance) -> Result<(), String> {
     if CONTEXT.with(Cell::get).is_some() {
         return Ok(());
     }
@@ -223,6 +228,10 @@ pub fn install(ui: &crate::App) -> Result<(), String> {
     if !VISIBLE.with(Cell::get) {
         reset();
         return Err("Tidak dapat menampilkan ikon tray".into());
+    }
+    if let Err(e) = instance.watch_activation(window) {
+        reset();
+        return Err(e.to_string());
     }
     Ok(())
 }
@@ -386,13 +395,12 @@ mod tests {
             result
         }
 
-        slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap();
+        slint::BackendSelector::new().backend_name("winit-software".into()).select().unwrap();
         let ui = crate::App::new().unwrap();
-        enable_full_repaint(&ui);
         ui.set_show_window_border(true);
         ui.set_active(2);
         let name = format!("Local\\fi-focus-tray-test-{}", std::process::id());
-        let instance = crate::instance::Instance::acquire_named(&name).unwrap().unwrap();
+        let mut instance = crate::instance::Instance::acquire_named(&name).unwrap().unwrap();
         let weak = ui.as_weak();
         let timer = slint::Timer::default();
         let mut stage = 0;
@@ -401,7 +409,7 @@ mod tests {
         timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
             let ui = weak.upgrade().unwrap();
             if stage == 0 {
-                install(&ui).unwrap();
+                install(&ui, &mut instance).unwrap();
                 original = CONTEXT.with(Cell::get).unwrap().window;
             }
             if stage == 10 {
@@ -413,15 +421,13 @@ mod tests {
                     .args(["--ignored", "--exact", "instance::tests::secondary_process", "--nocapture"])
                     .env("FI_FOCUS_TEST_INSTANCE", &name).status().unwrap();
                 assert!(status.success());
-                assert!(instance.take_activation_request());
-                assert!(restore());
             } else if stage == 14 || stage == 18 || stage == 24 {
                 assert_ne!(unsafe { IsWindowVisible(original) }, 0);
                 assert_eq!(unsafe { IsIconic(original) }, 0);
                 assert_eq!(CONTEXT.with(Cell::get).unwrap().window, original);
                 assert_eq!(ui.get_active(), 2);
                 assert!(VISIBLE.with(Cell::get));
-                assert_eq!(pixels(original, ui.window().scale_factor()), reference, "The entire client must be repainted");
+                assert_eq!(pixels(original, ui.window().scale_factor()), reference, "Client repaint at stage {stage}");
                 if stage == 14 {
                     // Simulate client contents lost by Windows, then request an OS
                     // repaint without changing any Slint properties or geometry.

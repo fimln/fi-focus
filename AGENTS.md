@@ -35,7 +35,7 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - RMS sama tidak berarti kenyaringan yang dirasakan sama. Gain Pink disesuaikan agar RMS mendekati white.
 - Pergantian mode memakai fade-out lalu fade-in sekitar 20 ms per tahap. State pink/brown dipertahankan saat berganti mode; stream baru memulai state dari nol.
 - Format output yang ditangani: F32, I16, U16. Format lain dan kegagalan perangkat harus masuk jalur error yang terlihat di UI.
-- Timer UI 50 ms melepas stream setelah fade berhenti selesai dan menangani error stream. Jangan melepas stream sebelum fade selesai.
+- Selama ada stream, timer UI 50 ms menangani error dan melepas stream setelah fade berhenti selesai. Timer berhenti saat idle setelah inisialisasi platform dan aktif kembali saat stream baru dibuka.
 
 ## UI dan lifecycle
 - Jendela Windows tanpa frame, ukuran awal 420×356, minimum 320×356. Perubahan ukuran awal perlu sinkron antara Slint dan pengaturan native di Rust.
@@ -43,9 +43,9 @@ Aplikasi pemutar white, pink, dan brown noise untuk Windows dan Android (Rust + 
 - Android memanggil `MainActivity.minimizeApp()` lewat JNI; Kotlin menjalankan `moveTaskToBack(true)` di UI thread. Jangan menggantinya dengan quit atau finish activity.
 - Foreground service mempertahankan notifikasi pemutaran. Generator dan stream tetap dimiliki Rust, bukan service Kotlin. Kelanjutan audio di latar belakang harus diuji pada perangkat; keberhasilan build saja tidak membuktikannya.
 - Windows menampilkan ikon tray selama proses berjalan. Menu kanan berisi Buka fi-focus dan Keluar; klik kiri/pulihkan memunculkan jendela lagi. Sakelar `run-in-tray` (default mati) disimpan di `HKCU\Software\fi-focus\RunInTray`; saat mati, Tutup mengakhiri proses seperti sebelumnya. Saat hidup, Tutup menyembunyikan jendela dengan `ShowWindow(SW_HIDE)` native, bukan `Window::hide()` Slint, karena hide Slint menghancurkan jendela Winit dan mengakhiri event loop. Tombol tutup native dan Alt+F4 mengikuti sakelar yang sama lewat subkelas WndProc.
-- Windows hanya menjalankan satu instance per sesi. Peluncuran berikutnya mengirim event aktivasi lalu keluar sebelum membuat UI/audio; proses pertama memulihkan jendela dari timer UI, termasuk jika tersembunyi di tray.
+- Windows hanya menjalankan satu instance per sesi. Peluncuran berikutnya mengirim event aktivasi lalu keluar sebelum membuat UI/audio. Thread pool Windows menunggu event dan mengirim pesan ke jendela utama untuk memulihkannya, termasuk saat tersembunyi di tray.
 - Sakelar tray juga mengaktifkan startup saat pengguna login Windows: entri `fi-focus` pada key Run menunjuk executable saat ini dengan argumen `--tray`. Saat dimatikan, entri dihapus. Preferensi lama dan path executable disinkronkan saat aplikasi dibuka. Peluncuran `--tray` dengan sakelar aktif menyembunyikan jendela setelah ikon tray terpasang, tanpa memutar audio; peluncuran biasa tetap membuka jendela. Kegagalan penyimpanan ditampilkan lewat dialog Windows.
-- Skia software pada Slint 1.18.1 memakai rendering notifier kosong agar setiap frame dirender penuh, sebagai workaround invalidasi Windows (slint-ui/slint#13568). Pertahankan hingga versi dengan perbaikan upstream tersedia dan teruji; `request_redraw()` saja tidak memaksa repaint penuh pada renderer parsial ini.
+- Windows memakai renderer software bawaan Slint melalui Winit. Pada `WM_PAINT` dengan area invalidasi dari Windows, tandai permukaan Slint untuk digambar ulang. Frame animasi biasa tetap memakai rendering parsial. Saat memperbarui Slint, uji pemulihan dari tray dan invalidasi native karena penandaan area memakai API internal Slint.
 - Tutup mengakhiri event loop bila sakelar tray mati. Pertahankan pemulihan error dengan mengetuk pilihan suara kembali.
 - Teks UI singkat, bahasa Indonesia. Pertahankan urutan white, pink, brown dan palet yang sudah ada.
 
