@@ -3,6 +3,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use slint::ComponentHandle;
 slint::include_modules!();
 #[cfg(windows)] mod media_controls;
+#[cfg(windows)] mod tray;
+#[cfg(windows)] mod instance;
 // These notifications leave the stream usable; dropping it would turn a
 // recoverable scheduling/route event into a permanent playback stop.
 fn fatal_audio_error(kind: cpal::ErrorKind) -> bool {
@@ -77,7 +79,7 @@ fn audio(state: Arc<AtomicU8>, silent: Arc<AtomicBool>, failed: Arc<AtomicBool>)
     }.map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?; Ok(stream)
 }
-fn start(minimize: impl Fn() + 'static) {
+fn start(minimize: impl Fn() + 'static, #[cfg(windows)] mut instance: instance::Instance) {
     let state = Arc::new(AtomicU8::new(0));
     let ui = App::new().unwrap();
     #[cfg(target_os="android")] ui.set_android_layout(true);
@@ -95,6 +97,8 @@ fn start(minimize: impl Fn() + 'static) {
             ));
         }
     }
+    #[cfg(windows)] ui.set_run_in_tray(tray::run_in_tray());
+    #[cfg(windows)] if let Err(e) = tray::sync_startup() { tray::report_settings_error(&e); }
     #[cfg(windows)]
     let media = std::rc::Rc::new(std::cell::RefCell::new(None::<media_controls::MediaControls>));
     let stream = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -105,6 +109,8 @@ fn start(minimize: impl Fn() + 'static) {
     let selected_state = state.clone();
     let selected_silent = silent.clone();
     let selected_failed = failed.clone();
+    let timer = std::rc::Rc::new(slint::Timer::default());
+    let playback_timer = timer.clone();
     #[cfg(windows)] let selected_media = media.clone();
     ui.on_select(move |n| {
         if !(0..=3).contains(&n) { return; }
@@ -119,7 +125,10 @@ fn start(minimize: impl Fn() + 'static) {
         selected_silent.store(false, Ordering::Relaxed);
         if new != 0 && selected_stream.borrow().is_none() {
             match audio(selected_state.clone(), selected_silent.clone(), selected_failed.clone()) {
-                Ok(audio_stream) => { *selected_stream.borrow_mut() = Some(audio_stream); }
+                Ok(audio_stream) => {
+                    *selected_stream.borrow_mut() = Some(audio_stream);
+                    playback_timer.restart();
+                }
                 Err(e) => {
                     eprintln!("Audio: {e}");
                     selected_state.store(0, Ordering::Relaxed);
@@ -133,9 +142,24 @@ fn start(minimize: impl Fn() + 'static) {
         #[cfg(windows)] if let Some(media) = selected_media.borrow().as_ref() { media.update(new); }
     });
     let weak = ui.as_weak();
-    let timer = slint::Timer::default();
+    let weak_timer = std::rc::Rc::downgrade(&timer);
     #[cfg(windows)] let mut media_initialized = false;
+    #[cfg(windows)] let mut tray_initialized = false;
+    #[cfg(windows)] let mut start_in_tray = tray::run_in_tray() && std::env::args_os().any(|arg| arg == "--tray");
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+        #[cfg(windows)] if !tray_initialized {
+            // Winit materializes the window on the first event loop turn, so the
+            // first tick sees the handle; a failed install is not retried.
+            if let Some(ui) = weak.upgrade() {
+                tray_initialized = true;
+                match tray::install(&ui, &mut instance) {
+                    Ok(()) => {
+                        if start_in_tray { tray::hide(); start_in_tray = false; }
+                    }
+                    Err(e) => eprintln!("Tray: {e}"),
+                }
+            }
+        }
         #[cfg(windows)] if !media_initialized {
             if let Some(ui) = weak.upgrade() {
                 match media_controls::MediaControls::new(&ui) {
@@ -155,25 +179,60 @@ fn start(minimize: impl Fn() + 'static) {
         } else if state.load(Ordering::Relaxed) == 0 && silent.load(Ordering::Relaxed) {
             stream.borrow_mut().take();
         }
+        #[cfg(windows)] if !tray_initialized || !media_initialized { return; }
+        if stream.borrow().is_none() {
+            if let Some(timer) = weak_timer.upgrade() { timer.stop(); }
+        }
     });
+    #[cfg(not(windows))] timer.stop();
+    #[cfg(windows)] {
     let drag_ui = ui.as_weak();
     ui.on_drag(move |x, y| {
-        #[cfg(windows)] if let Some(ui) = drag_ui.upgrade() {
+        if let Some(ui) = drag_ui.upgrade() {
             let pos = ui.window().position(); let scale = ui.window().scale_factor();
             ui.window().set_position(slint::PhysicalPosition::new(pos.x + (x*scale) as i32, pos.y + (y*scale) as i32));
         }
-        #[cfg(not(windows))] let _ = (&drag_ui, x, y);
     });
-    let minimized_ui = ui.as_weak();
+    }
+    #[cfg(windows)] let minimized_ui = ui.as_weak();
     ui.on_minimize_app(move || {
         #[cfg(windows)] if let Some(ui) = minimized_ui.upgrade() { ui.window().set_minimized(true); }
-        #[cfg(not(windows))] let _ = &minimized_ui;
         minimize();
     });
-    ui.on_close_app(|| { let _ = slint::quit_event_loop(); });
+    ui.on_close_app(|| {
+        // With the toggle on, Tutup leaves playback running next to the tray
+        // icon; otherwise it ends the process as before.
+        #[cfg(windows)]
+        if tray::run_in_tray() {
+            let _ = tray::hide();
+        } else {
+            let _ = slint::quit_event_loop();
+        }
+        #[cfg(not(windows))] let _ = slint::quit_event_loop();
+    });
+    // The same toggle controls close-to-tray and startup at Windows login.
+    #[cfg(windows)] {
+        let weak = ui.as_weak();
+        ui.on_set_run_in_tray(move |enabled| {
+            if let Err(e) = tray::remember(enabled) {
+                if let Some(ui) = weak.upgrade() { ui.set_run_in_tray(tray::run_in_tray()); }
+                tray::report_settings_error(&e);
+            }
+        });
+    }
+    #[cfg(windows)] let tray_cleanup = tray::guard();
     ui.run().unwrap();
+    #[cfg(windows)] drop(tray_cleanup);
 }
-#[cfg(windows)] pub fn run() { slint::BackendSelector::new().backend_name("winit-skia-software".into()).select().unwrap(); start(|| {  }); }
+#[cfg(windows)] pub fn run() {
+    let instance = match instance::Instance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => { eprintln!("Instance: {e}"); return; }
+    };
+    slint::BackendSelector::new().backend_name("winit-software".into()).select().unwrap();
+    start(|| {}, instance);
+}
 #[cfg(not(windows))] pub fn run() { start(|| {}); }
 #[cfg(target_os="android")]
 #[unsafe(no_mangle)] fn android_main(app: slint::android::AndroidApp) { let activity_app = app.clone();

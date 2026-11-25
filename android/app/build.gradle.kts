@@ -11,7 +11,7 @@ if (signingProperties.isNotEmpty()) {
 android {
  compileSdk = 37
  namespace = "com.fi.focus"
- defaultConfig { applicationId = "com.fi.focus"; minSdk = 26; targetSdk = 37; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a" } }
+ defaultConfig { applicationId = "com.fi.focus"; minSdk = 26; targetSdk = 37; versionCode = 5; versionName = "0.5.0"; ndk { abiFilters += "arm64-v8a" } }
  signingConfigs { if (signingProperties.isNotEmpty()) { create("release") { storeFile = file(signingProperties.getProperty("storeFile")); storePassword = signingProperties.getProperty("storePassword"); keyAlias = signingProperties.getProperty("keyAlias"); keyPassword = signingProperties.getProperty("keyPassword") } } }
  buildTypes { getByName("release") { signingConfig = signingConfigs.findByName("release"); isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
  packaging { jniLibs { useLegacyPackaging = true } }

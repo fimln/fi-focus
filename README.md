@@ -39,7 +39,7 @@ flowchart LR
     P --> M
     B --> M
     M --> OUT[Default output device]
-    T[50 ms UI timer] -.->|release stream after fade| CB
+    T[50 ms timer during playback] -.->|release stream after fade| CB
 ```
 
 ## Build
